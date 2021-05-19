@@ -3,8 +3,10 @@ import json
 import collections
 import unicodedata
 import torch
+import numpy as np
 
-torch.manual_seed(512)
+torch.manual_seed(1024)
+torch.cuda.manual_seed(1024)
 
 # 参考google团队
 # http://www.apache.org/licenses/LICENSE-2.0
@@ -115,11 +117,11 @@ class DataProcessor:
             i += 1
         return ["".join(x) for x in output]
 
-    def _create_examples(self, datas, data_type):
+    def _create_examples(self, datas, data_type, n):
         """将输入的json封装成input_example数据结构"""
         examples = []
         for idx, data in enumerate(datas):
-            # if idx > 10:
+            # if idx > 3000: # for debug
             #     break
             contexts = []
             candidates = []
@@ -127,21 +129,44 @@ class DataProcessor:
                 contexts.append(text["utterance"])
             gt = data["options-for-correct-answers"][0]["candidate-id"]
             # print(len(data["options-for-next"]))
+            label = []
+            label_idx = None
             for candidate_idx, candidate in enumerate(data["options-for-next"]):
-                candidates.append(candidate["utterance"])
                 if candidate["candidate-id"] == gt:
-                    label = candidate_idx
+                    label.append(1)
+                    label_idx = candidate_idx
+                    candidates.append(candidate["utterance"])
+                    break
+            if label_idx is None:
+                raise ValueError(f"Data: {data['example-id']} has no label")
+
+            # 随机挑选负例
+            neg_indices = [idx for idx in range(label_idx)] + [idx for idx in range(label_idx+1, len(data["options-for-next"]))] # 跳过正类
+            np.random.shuffle(neg_indices) # 注意np不能加seed
+            neg_indices = neg_indices[:n-1]
+            for candidate_idx in neg_indices:
+                candidate = data["options-for-next"][candidate_idx]
+                candidates.append(candidate["utterance"])
+                label.append(0)
+
+            # 防止变成正类永远在第一位
+            candidates_label = list(zip(candidates, label))
+            np.random.shuffle(candidates_label) # 注意np不能加seed
+            candidates, label = zip(*candidates_label)
+            candidates = list(candidates)
+            label = list(label)
+
             guid = "%s-%s" % (data_type, data["example-id"])
             examples.append(
                 InputExample(guid=guid, context=contexts, candidate=candidates, label=label)
             )
         return examples
 
-    def get_train_examples(self):
-        return self._create_examples(self.datasets["train"], "train")
+    def get_train_examples(self, n):
+        return self._create_examples(self.datasets["train"], "train", n)
     
-    def get_dev_examples(self):
-        return self._create_examples(self.datasets["dev"], "dev")
+    def get_dev_examples(self, n):
+        return self._create_examples(self.datasets["dev"], "dev", n)
     
     def get_dataset_tokens(self, examples):
         """将文本切分成token列表"""
@@ -289,7 +314,7 @@ class DataProcessor:
 
         all_contexts = torch.LongTensor(all_contexts)
         all_candidates = torch.LongTensor(all_candidates)
-        all_labels = torch.LongTensor(all_labels)
+        all_labels = torch.FloatTensor(all_labels)
 
         tensor_dataset = torch.utils.data.TensorDataset(all_contexts, all_candidates, all_labels)
         return tensor_dataset
